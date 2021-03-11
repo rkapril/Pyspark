@@ -1,0 +1,1001 @@
+driverMem : "4g" 
+executorOverheadMem : "9040m" 
+extraSparkConfig : "" 
+idleTimeout : 10000 
+persistentRun : TRUE 
+sparkReduceMethod : "auto" 
+sparklyrConnection : NULL 
+suppressWarning : TRUE 
+user : "sshuser" 
+rSessionPid : 22472L 
+appId : "62FFECC9FBE648F6A83A65319961A8A6" 
+jobId : "" 
+tmpFSWorkDir : "/dev/shm/" 
+shareDir : "/var/RevoShare/sshuser" 
+revoPath : "/usr/bin/Revo64" 
+wait : TRUE 
+consoleOutput : TRUE 
+autoCleanup : TRUE 
+workingDir : NULL 
+dataPath : NULL 
+outDataPath : NULL 
+packagesToLoad : NULL 
+email : NULL 
+resultsTimeout : 15 
+description : "spark" 
+version : "1.0-1" 
+compatibilityRequest : <environment> 
+> library(RevoScaleR)
+> 
+> ##########################################################################################################################################
+> ## Data sets full path
+> ##########################################################################################################################################
+> 
+> # Generate data with 1 Mn rows and copy it to the data directory "/Loans/Data" on HDFS. 
+> source(paste(getwd(),"/data_generation.R", sep =""))
+Picked up JAVA_TOOL_OPTIONS: -Xss4m
+copyFromLocal: `/Loans/Data/Borrower.csv': File exists
+copyFromLocal: `/Loans/Data/Loan.csv': File exists
+copyFromLocal: `/Loans/Data/MergedLabeled.csv': File exists
+> 
+> # Write the full path to the 2 data sets.
+> Loan <- "/Loans/Data/Loan.csv"
+> Borrower <- "/Loans/Data/Borrower.csv"
+> 
+> ##########################################################################################################################################
+> ## Directories
+> ##########################################################################################################################################
+> 
+> # Local (edge node) working directory. We assume it already exists. 
+> LocalWorkDir <- paste("/var/RevoShare/", Sys.info()[["user"]], "/LoanCreditRisk/dev", sep="") 
+> #dir.create(LocalWorkDir, recursive = TRUE)
+> 
+> # HDFS directory for user calculation. We assume it already exists. 
+> HDFSWorkDir <- paste("/",Sys.info()[["user"]],"/LoanCreditRisk/dev", sep="")
+> #rxHadoopMakeDir(HDFSWorkDir)
+> 
+> ##############################################################################################################################
+> ## Define main function
+> ##############################################################################################################################
+> 
+> ## The user should replace the directory in "source" function with the directory of his own.
+> ## The directory should be the full path containing the source scripts.
+> 
+> loan_dev <- function(Loan,
++                      Borrower,
++                      LocalWorkDir,
++                      HDFSWorkDir, 
++                      Stage = "Dev"){
++   
++   # step0: intermediate directories creation.
++   print("Creating Intermediate Directories on Local and HDFS...")
++   source(paste(getwd(),"/step0_directories_creation.R", sep =""))
++   
++   ## Define and create the directory where summary statistics, models etc. will be saved in the Development stage.
++   LocalModelsDir <- file.path(LocalWorkDir, "model")
++   if(dir.exists(LocalModelsDir)){
++     system(paste("rm -rf ",LocalModelsDir,"/*", sep="")) # clean up the directory if exists
++   } else {
++     dir.create(LocalModelsDir, recursive = TRUE) # make new directory if doesn't exist
++   }
++   
++   # step1: data processing
++   source(paste(getwd(),"/step1_preprocessing.R", sep =""))
++   print("Step 1: Data Processing.")
++   
++   data_preprocess(Loan, 
++                   Borrower, 
++                   LocalWorkDir,
++                   HDFSWorkDir,
++                   Stage = Stage)
++   
++   # step2: feature engineering
++   source(paste(getwd(),"/step2_feature_engineering.R", sep =""))
++   print("Step 2: Feature Engineering.")
++   
++   feature_engineer(LocalWorkDir,
++                    HDFSWorkDir,
++                    splitting_ratio = 0.7,
++                    Stage = Stage)
++   
++   # step3: training, scoring and evaluation of Logistic Regression. 
++   source(paste(getwd(),"/step3_train_score_evaluate.R", sep =""))
++   print("Step 3: Training, Scoring and Evaluating.")
++   
++   metrics <- training_evaluation (LocalWorkDir,
++                                   HDFSWorkDir,
++                                   splitting_ratio = 0.7,
++                                   Stage = Stage)
++   
++   # Step 4: operational metrics computation and scores transformation.  
++   source(paste(getwd(),"/step4_operational_metrics.R", sep =""))
++   print("Step 4: Operational Metrics Computation and Scores Transformation.")
++   
++   ## Compute operational metrics and plot the rates of bad loans for various thresholds obtained through binning. 
++   Operational_Metrics <- compute_operational_metrics(LocalWorkDir,
++                                                      HDFSWorkDir)
++   
++   plot(Operational_Metrics$badRate, main = c("Rate of Bad Loans Among those with Scores Higher than Decision Thresholds"), xlab = "Default Score Percentiles", ylab = "Expected Rate of Bad Loans")
++   
++   ## EXAMPLE: 
++   ## If the score cutoff of the 91th score percentile is 0.9834, and we read a bad rate of 0.6449.  
++   ## This means that if 0.9834 is used as a threshold to classify loans as bad, we would have a bad rate of 64.49%.  
++   ## This bad rate is equal to the number of observed bad loans over the total number of loans with a score greater than the threshold. 
++   
++   ## Transform the scores using the computed thresholds. 
++   apply_score_transformation (LocalWorkDir,
++                               HDFSWorkDir,
++                               Stage = Stage)
++   
++   
++   # Finally, we copy the global means, modes and quantiles and the trained model for use in Production and Web Scoring.
++   # You can change the value of update_prod_flag to 0 or comment out the code below to avoid overwriting those currently in use for Production.
++   
++   update_prod_flag = 1 
++   if (update_prod_flag == 1){
++     # Production directory that will hold the development data. 
++     ProdModelDir <- paste("/var/RevoShare/", Sys.info()[["user"]], "/LoanCreditRisk/prod/model/", sep="") 
++     # Development directory that holds data to be used in Production. 
++     DevModelDir <- LocalModelsDir
++     
++     source(paste(getwd(),"/copy_dev_to_prod.R", sep =""))
++     copy_dev_to_prod(DevModelDir, ProdModelDir)
++   } 
++   
++   return(metrics)
++ }
+> 
+> ##############################################################################################################################
+> ## Apply the main function
+> ##############################################################################################################################
+> 
+> metrics <- loan_dev (Loan, Borrower, LocalWorkDir, HDFSWorkDir, Stage = "Dev")
+[1] "Creating Intermediate Directories on Local and HDFS..."
+Picked up JAVA_TOOL_OPTIONS: -Xss4m
+Picked up JAVA_TOOL_OPTIONS: -Xss4m
+21/03/02 14:34:52 WARN azure.AzureFileSystemThreadPoolExecutor: Disabling threads for Delete operation as thread count 0 is <= 1
+21/03/02 14:34:52 INFO azure.AzureFileSystemThreadPoolExecutor: Time taken for Delete operation is: 585 ms with threads: 0
+Deleted /sshuser/LoanCreditRisk/dev/temp
+Picked up JAVA_TOOL_OPTIONS: -Xss4m
+[1] "Step 1: Data Processing."
+[1] "Converting the input data to xdf on HDFS..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:35:04 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:35:06 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+ 
+Elapsed time to compute low/high values and/or factor levels: 6.582 secs. 
+ 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:35:36 2021  ====== 
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:35:46 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:35:47 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+ 
+Elapsed time to compute low/high values and/or factor levels: 4.228 secs. 
+ 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:36:15 2021  ====== 
+[1] "Merging Loan and Borrower..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:36:26 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:36:27 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:36:34 2021  ====== 
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:36:46 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:36:47 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:36:54 2021  ====== 
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:37:39 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:37:47 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:38:13 2021  ====== 
+[1] "Looking for variables with missing values..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:38:25 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:38:26 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:38:28 2021  ====== 
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:38:39 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:38:40 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+Computation time: 4.553 seconds. 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:38:47 2021  ====== 
+[1] "Variables containing missing values are:"
+[1] "isJointApplication" "loanAmount"         "term"               "numOpenCreditLines"
+[1] "Replacing missing values with the global mean or mode..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:38:58 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:38:59 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:39:28 2021  ====== 
+[1] "Step 1 Completed."
+[1] "Step 2: Feature Engineering."
+[1] "Creating the label isBad based on loanStatus..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:39:39 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:39:41 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+Loading required package: hashFunction 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:40:09 2021  ====== 
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:40:20 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:40:22 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+21/03/02 14:40:37 WARN azure.AzureFileSystemThreadPoolExecutor: Disabling threads for Delete operation as thread count 0 is <= 1 
+21/03/02 14:40:37 INFO azure.AzureFileSystemThreadPoolExecutor: Time taken for Delete operation is: 57 ms with threads: 0 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:40:37 2021  ====== 
+[1] "Creating a training set to be used to compute bins..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:40:48 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:40:49 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:41:18 2021  ====== 
+[1] "Computing the bins to be used to create buckets..."
+[1] "Bucketizing numeric variables..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:42:20 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:42:23 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:42:51 2021  ====== 
+[1] "Transforming newly created variables to factors..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:43:01 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:43:03 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:43:21 2021  ====== 
+[1] "Saving the variable information for Production and Web Scoring use..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:43:33 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:43:34 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:43:36 2021  ====== 
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:43:47 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:43:48 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:43:56 2021  ====== 
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:44:08 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:44:09 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+21/03/02 14:44:25 WARN azure.AzureFileSystemThreadPoolExecutor: Disabling threads for Delete operation as thread count 0 is <= 1 
+21/03/02 14:44:25 INFO azure.AzureFileSystemThreadPoolExecutor: Time taken for Delete operation is: 58 ms with threads: 0 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:44:25 2021  ====== 
+[1] "Step 2 Completed."
+[1] "Step 3: Training, Scoring and Evaluating."
+[1] "Randomly Splitting into a training and a testing set using the hashCode created in step 2..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:44:36 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:44:38 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+21/03/02 14:44:54 WARN azure.AzureFileSystemThreadPoolExecutor: Disabling threads for Delete operation as thread count 0 is <= 1 
+21/03/02 14:44:54 INFO azure.AzureFileSystemThreadPoolExecutor: Time taken for Delete operation is: 57 ms with threads: 0 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:45:11 2021  ====== 
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:45:23 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:45:25 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:45:53 2021  ====== 
+[1] "Writing the formula for training..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:46:03 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:46:05 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:46:07 2021  ====== 
+[1] "Training the logistic regression model..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:46:17 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:46:19 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+Computing mutual information 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.372422, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.138009, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.132414, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.120288, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.120567, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.126593, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.11991, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.336406, Transform Time: 3.8147e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.117786, Transform Time: 3.8147e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.124342, Transform Time: 3.8147e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.126933, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.143021, Transform Time: 6.19888e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.117297, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.116421, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.34447, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.124849, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.11378, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.112659, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.113851, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.113054, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.113502, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.307669, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.116353, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.117157, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.113788, Transform Time: 7.29561e-05 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.115353, Transform Time: 7.41482e-05 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.108246, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.111647, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.417533, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.105859, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.109426, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.111625, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.125503, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.112615, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.129489, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.320201, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.109024, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.113281, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.109758, Transform Time: 3.8147e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.115649, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.119944, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.109267, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.2921, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.108954, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.124138, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.108869, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.115565, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.112767, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.107072, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.303179, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.11688, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.115128, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.115351, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.111029, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.118928, Transform Time: 3.8147e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.111729, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.305928, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.111291, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.107442, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.112165, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.115213, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.114583, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.116658, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.301159, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.108905, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.109895, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.108733, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.104343, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.102532, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.109862, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.299069, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.103248, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.113646, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.106663, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.108707, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.108965, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.106325, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.372394, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.140522, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.105459, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.107054, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.106311, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.106125, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.104426, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.309132, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.1102, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.11027, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.104047, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.107916, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.118645, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.102977, Transform Time: 3.8147e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.314508, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.10791, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.109014, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.108476, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.118368, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.115502, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.123115, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.327339, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.147672, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.131509, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.152445, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.118988, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.118579, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.125094, Transform Time: 6.19888e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.320693, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.116123, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.114075, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.114272, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.119145, Transform Time: 2.88486e-05 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.121621, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.114092, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.317282, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.118744, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.114645, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.110978, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.112483, Transform Time: 3.8147e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.108927, Transform Time: 3.8147e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.113252, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.306093, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.114631, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.118768, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.118846, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.10819, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.117658, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.104285, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.309819, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.117344, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.119842, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.121396, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.109464, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.118053, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.121032, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.317006, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.118751, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.119955, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.131328, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.127804, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.106706, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.102185, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.315242, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.102137, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.10226, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.110293, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.113138, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.109431, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.101865, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.298144, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.102292, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.099798, Transform Time: 3.09944e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.105233, Transform Time: 3.09944e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.106102, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.18563, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.114658, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Finished mutual information computation in 00:00:22.7766138 
+Selecting features to drop 
+Selected 1 slots out of 1 in column 'purpose' 
+Selected 0 slots out of 1 in column 'isJointApplication' 
+Selected 1 slots out of 1 in column 'grade' 
+Selected 0 slots out of 1 in column 'yearsEmployment' 
+Selected 0 slots out of 1 in column 'homeOwnership' 
+Selected 0 slots out of 1 in column 'incomeVerified' 
+Selected 1 slots out of 1 in column 'loanAmountBucket' 
+Selected 1 slots out of 1 in column 'interestRateBucket' 
+Selected 1 slots out of 1 in column 'monthlyPaymentBucket' 
+Selected 1 slots out of 1 in column 'annualIncomeBucket' 
+Selected 1 slots out of 1 in column 'dtiRatioBucket' 
+Selected 0 slots out of 1 in column 'lengthCreditHistoryBucket' 
+Selected 0 slots out of 1 in column 'numTotalCreditLinesBucket' 
+Selected 0 slots out of 1 in column 'numOpenCreditLinesBucket' 
+Selected 1 slots out of 1 in column 'numOpenCreditLines1YearBucket' 
+Selected 1 slots out of 1 in column 'revolvingBalanceBucket' 
+Selected 1 slots out of 1 in column 'revolvingUtilizationRateBucket' 
+Selected 0 slots out of 1 in column 'numDerogatoryRecBucket' 
+Selected 0 slots out of 1 in column 'numDelinquency2YearsBucket' 
+Selected 0 slots out of 1 in column 'numChargeoff1yearBucket' 
+Selected 0 slots out of 1 in column 'numInquiries6MonBucket' 
+Total number of slots selected: 10 
+Not adding a normalizer. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.291656, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.108933, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.111207, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.106628, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.105322, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.10459, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.104197, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Beginning read for block: 1 
+Rows Read: 1391, Read Time: 0.299971, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1221, Read Time: 0.113699, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1157, Read Time: 0.110243, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 1103, Read Time: 0.116334, Transform Time: 4.05312e-06 
+Beginning read for block: 2 
+Rows Read: 1011, Read Time: 0.114943, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 900, Read Time: 0.110669, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 186, Read Time: 0.107845, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+LBFGS multi-threading will attempt to load dataset into memory. In case of out-of-memory issues, turn off multi-threading by setting trainThreads to 1. 
+Beginning optimization 
+num vars: 90 
+improvement criterion: Mean Improvement 
+L1 regularization selected 51 of 90 weights. 
+Not training a calibrator because it is not needed. 
+Elapsed time: 00:00:25.8756132 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:46:47 2021  ====== 
+Elapsed time: 00:00:00.4055285
+[1] "Logistic_Coeff......"
+                           variable coefficient
+2              annualIncomeBucket.1  2.47105503
+3              annualIncomeBucket.6 -2.37702942
+1                            (Bias) -2.31078863
+4          revolvingBalanceBucket.5 -1.89993095
+5                          grade.A1 -1.69388235
+6                  dtiRatioBucket.5  1.61014163
+7                          grade.E1  1.43046927
+8                          grade.A2 -1.39045918
+9              interestRateBucket.4  1.34040105
+10                 dtiRatioBucket.1 -1.33803368
+11                         grade.E2  1.21859443
+12                         grade.E3  1.14093792
+13             annualIncomeBucket.2  1.12054861
+14                         grade.A3 -1.11940813
+15             interestRateBucket.1 -1.10343385
+16             annualIncomeBucket.7 -0.94693053
+17                purpose.education -0.92167699
+18         revolvingBalanceBucket.1  0.84318084
+19                     purpose.auto -0.82170779
+20         revolvingBalanceBucket.4 -0.80442375
+21                         grade.B1 -0.79954743
+22                 dtiRatioBucket.4  0.78025228
+23                         grade.D2  0.77452463
+24                         grade.B2 -0.76954579
+25             interestRateBucket.2 -0.73507595
+26               purpose.healthcare  0.66450107
+27 revolvingUtilizationRateBucket.1 -0.65456837
+28             annualIncomeBucket.3  0.62068409
+29               loanAmountBucket.1 -0.53186506
+30               loanAmountBucket.4  0.52482927
+31                         grade.D1  0.51715297
+32  numOpenCreditLines1YearBucket.3  0.50475913
+33  numOpenCreditLines1YearBucket.1 -0.50168270
+34             annualIncomeBucket.5 -0.47372305
+35                 dtiRatioBucket.2 -0.46112135
+36                 purpose.business  0.42779815
+37                         grade.D3  0.42743182
+38         revolvingBalanceBucket.2  0.42602256
+39                         grade.C1 -0.39449826
+40                         grade.B3 -0.33844441
+41 revolvingUtilizationRateBucket.3  0.22881971
+42           monthlyPaymentBucket.4  0.17533490
+43                         grade.C3  0.16482231
+44           monthlyPaymentBucket.1 -0.15026763
+45             interestRateBucket.3  0.12793368
+46          purpose.homeimprovement  0.10411742
+47               loanAmountBucket.2 -0.09894469
+48         revolvingBalanceBucket.3  0.09263112
+49           monthlyPaymentBucket.2 -0.08062199
+50        purpose.debtconsolidation -0.06240767
+51               loanAmountBucket.3  0.03864129
+[1] "logistic_model parameters......"
+$Formula
+[1] "isBad~purpose+isJointApplication+grade+yearsEmployment+homeOwnership+incomeVerified+loanAmountBucket+interestRateBucket+monthlyPaymentBucket+annualIncomeBucket+dtiRatioBucket+lengthCreditHistoryBucket+numTotalCreditLinesBucket+numOpenCreditLinesBucket+numOpenCreditLines1YearBucket+revolvingBalanceBucket+revolvingUtilizationRateBucket+numDerogatoryRecBucket+numDelinquency2YearsBucket+numChargeoff1yearBucket+numInquiries6MonBucket"
+
+$File
+[1] "/sshuser/LoanCreditRisk/dev/temp/Train"
+
+$fileSystem
+NULL
+
+$DataSource
+$DataSource$fileSystem
+File System Type: hdfs 
+Host Name:        default 
+Port:             0 
+UseWebHdfs:       FALSE 
+OAuthParameters:  
+Verbose:          FALSE 
+
+$DataSource$blocksPerCompositeFile
+[1] 3
+
+$DataSource$readByBlock
+[1] TRUE
+
+$DataSource$xdfUuid
+[1] "037AD5744C6F4E639347F7498848183B"
+
+$DataSource$cache
+[1] FALSE
+
+$DataSource$dfName
+[1] "df-38E0727B6F9C4DD0A9B472D3AA1BEF3B"
+
+$DataSource$dfType
+[1] "xdf"
+
+$DataSource$dfSource
+[1] "/sshuser/LoanCreditRisk/dev/temp/Train"
+
+$DataSource$file
+[1] "/sshuser/LoanCreditRisk/dev/temp/Train"
+
+$DataSource$colNames
+[1] ""
+
+$DataSource$returnDataFrame
+[1] TRUE
+
+$DataSource$stringsAsFactors
+[1] FALSE
+
+$DataSource$rowsOrBlocksPerRead
+[1] 1
+
+$DataSource$class
+[1] "RxXdfData"
+
+$DataSource$openType
+[1] 0
+
+
+$RemoveMissings
+[1] TRUE
+
+$readVars
+ [1] "purpose"                        "isJointApplication"             "grade"                         
+ [4] "yearsEmployment"                "homeOwnership"                  "incomeVerified"                
+ [7] "loanAmountBucket"               "interestRateBucket"             "monthlyPaymentBucket"          
+[10] "annualIncomeBucket"             "dtiRatioBucket"                 "lengthCreditHistoryBucket"     
+[13] "numTotalCreditLinesBucket"      "numOpenCreditLinesBucket"       "numOpenCreditLines1YearBucket" 
+[16] "revolvingBalanceBucket"         "revolvingUtilizationRateBucket" "numDerogatoryRecBucket"        
+[19] "numDelinquency2YearsBucket"     "numChargeoff1yearBucket"        "numInquiries6MonBucket"        
+[22] "isBad"                         
+
+$formulaTransformMap
+NULL
+
+$formulaVars
+ [1] "purpose"                        "isJointApplication"             "grade"                         
+ [4] "yearsEmployment"                "homeOwnership"                  "incomeVerified"                
+ [7] "loanAmountBucket"               "interestRateBucket"             "monthlyPaymentBucket"          
+[10] "annualIncomeBucket"             "dtiRatioBucket"                 "lengthCreditHistoryBucket"     
+[13] "numTotalCreditLinesBucket"      "numOpenCreditLinesBucket"       "numOpenCreditLines1YearBucket" 
+[16] "revolvingBalanceBucket"         "revolvingUtilizationRateBucket" "numDerogatoryRecBucket"        
+[19] "numDelinquency2YearsBucket"     "numChargeoff1yearBucket"        "numInquiries6MonBucket"        
+[22] "isBad"                         
+
+$env
+<environment: 0x5993528>
+
+$transformFunc
+NULL
+
+$transformVars
+NULL
+
+$transformVarsNoRowSelection
+NULL
+
+$hasRowSelection
+[1] FALSE
+
+$RowSelection
+[1] ""
+
+$NewVars
+[1] ""
+
+$Transforms
+[1] ""
+
+$Print
+[1] TRUE
+
+$ReportProgress
+[1] TRUE
+
+$ReportTiming
+[1] 1
+
+$FormLower
+NULL
+
+$FormUpper
+NULL
+
+$FaddCP
+data frame with 0 columns and 0 rows
+
+$blocksPerRead
+[1] 1
+
+$overwrite
+[1] FALSE
+
+$outDataFrame
+[1] FALSE
+
+$rowsPerWrite
+[1] 5e+05
+
+$inModelBin
+NULL
+
+$inModelsBin
+NULL
+
+$ShowDetailedIterations
+[1] FALSE
+
+$ShowIterations
+[1] TRUE
+
+$analysisType
+[1] "Train"
+
+$depVar
+[1] "isBad"
+
+$indVars
+ [1] "purpose"                        "isJointApplication"             "grade"                         
+ [4] "yearsEmployment"                "homeOwnership"                  "incomeVerified"                
+ [7] "loanAmountBucket"               "interestRateBucket"             "monthlyPaymentBucket"          
+[10] "annualIncomeBucket"             "dtiRatioBucket"                 "lengthCreditHistoryBucket"     
+[13] "numTotalCreditLinesBucket"      "numOpenCreditLinesBucket"       "numOpenCreditLines1YearBucket" 
+[16] "revolvingBalanceBucket"         "revolvingUtilizationRateBucket" "numDerogatoryRecBucket"        
+[19] "numDelinquency2YearsBucket"     "numChargeoff1yearBucket"        "numInquiries6MonBucket"        
+
+$tlcPath
+[1] "/usr/lib64/microsoft-r/3.3/lib64/R/library/MicrosoftML/mxLibs/x64"
+
+$verbose
+[1] 1
+
+$coreClrPath
+[1] ""
+
+$telemetryInfo
+[1] "rxLogisticRegression"
+
+[1] "Scoring the logistic regression model..."
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:46:59 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:47:01 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+Beginning read for block: 1 
+Rows Read: 588, Read Time: 0.356163, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Rows Read: 528, Read Time: 0.14279, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Finished writing 588 rows. 
+Rows Read: 489, Read Time: 0.116545, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Finished writing 528 rows. 
+Rows Read: 454, Read Time: 0.121826, Transform Time: 5.00679e-06 
+Beginning read for block: 2 
+Finished writing 489 rows. 
+Rows Read: 466, Read Time: 0.122092, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Finished writing 454 rows. 
+Rows Read: 419, Read Time: 0.108527, Transform Time: 5.96046e-06 
+Beginning read for block: 2 
+Finished writing 466 rows. 
+Rows Read: 87, Read Time: 0.104896, Transform Time: 5.96046e-06 
+Finished writing 419 rows. 
+Beginning read for block: 2 
+No rows remaining. Finished reading data set. 
+Elapsed time: 00:00:05.4818094 
+Finished writing 87 rows. 
+Writing completed. 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:47:09 2021  ====== 
+[1] "Evaluating the logistic regression model..."
+Rows Read: 588, Total Rows Processed: 588, Total Chunk Time: 0.097 seconds
+Rows Read: 528, Total Rows Processed: 1116, Total Chunk Time: Less than .001 seconds
+Rows Read: 489, Total Rows Processed: 1605, Total Chunk Time: Less than .001 seconds
+Rows Read: 454, Total Rows Processed: 2059, Total Chunk Time: Less than .001 seconds
+Rows Read: 466, Total Rows Processed: 2525, Total Chunk Time: Less than .001 seconds
+Rows Read: 419, Total Rows Processed: 2944, Total Chunk Time: Less than .001 seconds
+Rows Read: 87, Total Rows Processed: 3031, Total Chunk Time: Less than .001 seconds 
+        Predicted
+Observed    0    1
+       0 2279  444
+       1   59  249
+[1] "Step 3 Completed."
+[1] "Evaluation Metrics:"
+       Accuracy       Precision          Recall         F-Score             AUC              KS Score Threshold 
+      0.8340482       0.9747648       0.8369445       0.9006125       0.8962231       0.6453861       0.1051151 
+[1] "Step 4: Operational Metrics Computation and Scores Transformation."
+[1] "Computing operational metrics..."
+Rows Read: 588, Total Rows Processed: 588, Total Chunk Time: 0.103 seconds
+Rows Read: 528, Total Rows Processed: 1116, Total Chunk Time: Less than .001 seconds
+Rows Read: 489, Total Rows Processed: 1605, Total Chunk Time: Less than .001 seconds
+Rows Read: 454, Total Rows Processed: 2059, Total Chunk Time: Less than .001 seconds
+Rows Read: 466, Total Rows Processed: 2525, Total Chunk Time: Less than .001 seconds
+Rows Read: 419, Total Rows Processed: 2944, Total Chunk Time: Less than .001 seconds
+Rows Read: 87, Total Rows Processed: 3031, Total Chunk Time: Less than .001 seconds 
+Rows Read: 3031, Total Rows Processed: 3031, Total Chunk Time: 0.004 seconds 
+Computation time: 0.010 seconds.
+Rows Read: 100, Total Rows Processed: 100, Total Chunk Time: 1.657 seconds 
+The `reset` argument is set to FALSE. Reusing the existing Spark application (scaleR-spark-won2r0FHOA-sshuser-22472-62FFECC9FBE648F6A83A65319961A8A6).
+======  ed0-rayspa (Master HPA Process) has started run at Tue Mar  2 14:47:36 2021  ====== 
+Picked up JAVA_TOOL_OPTIONS: -Xss4m 
+21/03/02 14:47:38 WARN util.NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable 
+======  ed0-rayspa (Master HPA Process) has completed run at Tue Mar  2 14:47:52 2021  ====== 
+[1] "The hive table Operational_Metrics is stored under the folder: /hive/warehouse"
+[1] "Transforming scores based on operational metrics..."
+Rows Read: 588, Total Rows Processed: 588, Total Chunk Time: 0.087 seconds
+Rows Read: 528, Total Rows Processed: 1116, Total Chunk Time: Less than .001 seconds
+Rows Read: 489, Total Rows Processed: 1605, Total Chunk Time: 0.001 seconds
+Rows Read: 454, Total Rows Processed: 2059, Total Chunk Time: Less than .001 seconds
+Rows Read: 466, Total Rows Processed: 2525, Total Chunk Time: Less than .001 seconds
+Rows Read: 419, Total Rows Processed: 2944, Total Chunk Time: Less than .001 seconds
+Rows Read: 87, Total Rows Processed: 3031, Total Chunk Time: Less than .001 seconds 
+Rows Read: 3031, Total Rows Processed: 3031, Total Chunk Time: 1.525 seconds 
+The `reset` argument is set to FALSE. Reusing the existing Spark application (scaleR-spark-won2r0FHOA-sshuser-22472-62FFECC9FBE648F6A83A65319961A8A6).
+[1] "The hive table with the scores and data is stored under the folder /hive/warehouse"
+> 
